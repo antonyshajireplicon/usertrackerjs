@@ -22,7 +22,7 @@
     // ===============================
     // Load / Init Session Data
     // ===============================
-    console.log('🔧 Navigation Tracker: Initializing...');
+    console.log('🔧 Navigation Tracker: Initializing.');
     let sessionData = { pages: [], totalTime: 0, apiCalled: false, recommendations: '', emailCapture: { submittedUrls: [], dismissedAtByUrl: {} } };
     const saved = getCookie('sessionData');
     if (saved) {
@@ -62,6 +62,7 @@
         container.innerHTML = sessionData.recommendations;
         document.body.appendChild(container);
         console.log('📦 Navigation Tracker: Restored response container from cookie');
+        try { attachRecommendationClickListeners(); } catch(e) { console.warn('⚠️ attachRecommendationClickListeners call failed', e); }
     }
 
     // ===============================
@@ -100,7 +101,7 @@
     function checkThreshold() {
         // console.log('🎯 Navigation Tracker: Checking threshold - Total time:', Math.round(sessionData.totalTime/1000) + 's, Threshold:', Math.round(ACTIVITY_THRESHOLD/1000) + 's, API called:', sessionData.apiCalled);
         if (!sessionData.apiCalled && sessionData.totalTime >= ACTIVITY_THRESHOLD) {
-            console.log('🚀 Navigation Tracker: Threshold reached! Calling API...');
+            console.log('🚀 Navigation Tracker: Threshold reached! Calling API.');
             sessionData.apiCalled = true;
             setSessionCookie('sessionData', JSON.stringify(sessionData));
             // Ensure the recommendations button is visible as soon as threshold is met
@@ -138,7 +139,7 @@
     // ===============================
     window.addEventListener('beforeunload', () => {
         const now = performance.now();
-        console.log('🚪 Navigation Tracker: Page unloading...');
+        console.log('🚪 Navigation Tracker: Page unloading.');
         if (pageVisible) {
             const delta = now - lastTimestamp;
             pageInfo.time += delta;
@@ -200,6 +201,7 @@
                 container.style.display = 'none';
                 container.innerHTML = sessionData.recommendations;
                 document.body.appendChild(container);
+                try { attachRecommendationClickListeners(); } catch(e) { console.warn('⚠️ attachRecommendationClickListeners call failed', e); }
                 hasContent = true;
                 console.log('📦 Navigation Tracker: Recreated response container from cookie on demand');
             }
@@ -217,103 +219,143 @@
     }
 
     // ===============================
-    // Send Data to OpenAI
-    // ===============================
-    async function sendDataToOpenAI() {
-        console.log('🤖 Navigation Tracker: Preparing API request...');
-        // Build session context string
-        const contextText = sessionData.pages.map(p =>
-            `Title: "${p.title}", URL: ${p.url}, TimeSpent: ${Math.round(p.time/1000)}s`
-        ).join('\n');
-
-        const prompt = `User session pages:
-        ${contextText}
-        
-        Based on the above browsing history, recommend exactly two related blog posts from this website. Only recommend posts that are on this website with /blog/ in the URL. Do not recommend links that will redirect to different page. Check the page URLs carefully before recommending. If no relevant blog posts are found, respond with "No suggestions found."
-        
-        Formatting rules:
-        1. Response must start with: "<h4>Here are the related posts based on your browsing activity:</h4>"
-        2. Show the results as an unordered HTML list (<ul><li>...</li></ul>)
-        3. Each list item must contain, in this order:
-           - A thumbnail image of the post (<img src="https://yourdomain.com/path/to/thumbnail.jpg" style="width:120px;height:auto;">). 
-             If a thumbnail is not available, use this fallback: https://webcdn.replicon.com/assets/images/2023/08/deltek-replicon-logo.svg
-           - A clickable hyperlink with the post title as anchor text (<a href="https://yourdomain.com/...">Title</a>)
-           - A line break (<br>) immediately after the title
-           - A short description of the post (minimum 15 words, maximum 30 words) below the line break
-           - A line break (<br>) immediately after the description
-        4. Always use absolute URLs with the full domain of this website for both links and images. Do not include external links or images.
-        5. Do not include any extra text, explanations, or formatting beyond the required structure.`;
-        
-        
-        console.log('📝 Navigation Tracker: API prompt:', prompt);
-
-        try {
-            console.log('🌐 Navigation Tracker: Sending request to Groq API...');
-            const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + OPENAI_API_KEY
-                },
-                body: JSON.stringify({
-                    model: CHAT_MODEL,
-                    messages: [{ role: 'user', content: prompt }]
-                })
-            });
-            console.log('📡 Navigation Tracker: API response status:', res.status);
-            const data = await res.json();
-            const answer = data.choices?.[0]?.message?.content || 'No suggestions found.';
-            console.log('✅ Navigation Tracker: API response received:', answer);
-
-            // Hidden container for response
-            const container = document.createElement('div');
-            container.id = 'api-response-container';
-            container.style.display = 'none';
-            container.innerHTML = answer;
-            document.body.appendChild(container);
-            console.log('📦 Navigation Tracker: Response container created');
-            // Save response in cookie
-            sessionData.recommendations = answer;
-            setSessionCookie('sessionData', JSON.stringify(sessionData));
-
-            // fetch('https://backendnewsite.wpengine.com/tracker/record-tracking.php', {
-            //     method: 'POST',
-            //     body: JSON.stringify(sessionData)
-            // });
-
-            fetch('https://deltektest.eliteopenjournals.com/api/navtrack', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json' // tells Laravel it’s JSON
-                },
-                body: JSON.stringify(sessionData),
-                mode: 'cors' // ensures cross-origin request
-            })
-            .then(response => response.json())
-            .then(data => {
-                console.log('Success:', data);
-            })
-            .catch(error => {
-                console.error('Error:', error);
-            });
-            
-            console.log('📡 Navigation Tracker: Session data sent to server');
-            // Ensure button is present once we have a response
-            ensureRecommendationsButton();
-            // (Re)initialize email capture state based on new recommendations
-            try { maybeInitEmailCaptureForThisPage(); } catch(e) { console.warn('⚠️ Email-capture reinit failed:', e); }
-        } catch (err) {
-            console.error('❌ Navigation Tracker: API request failed:', err);
-        } finally {
-            isFetchingRecommendations = false;
+// Sitemap Parsing Helper
+// ===============================
+async function fetchValidBlogUrlsFromSitemap() {
+    const sitemapUrl = window.location.origin + '/post-sitemap.xml';
+    try {
+        const res = await fetch(sitemapUrl);
+        if (!res.ok) {
+            console.warn('⚠️ Sitemap fetch failed with status:', res.status);
+            return [];
         }
+
+        const xmlText = await res.text();
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlText, 'application/xml');
+        const locNodes = xmlDoc.querySelectorAll('loc');
+        const urls = Array.from(locNodes).map(node => node.textContent.trim());
+
+        // Filter URLs to include only /blog/ pages
+        const blogUrls = urls.filter(url => url.includes('/blog/'));
+
+        console.log(`🗺️ Sitemap loaded: Found ${blogUrls.length} blog URLs`);
+        return blogUrls;
+    } catch (err) {
+        console.error('❌ Failed to read sitemap:', err);
+        return [];
     }
+}
+
+
+// ===============================
+// Send Data to OpenAI with Sitemap Integration
+// ===============================
+async function sendDataToOpenAI() {
+    console.log('🤖 Navigation Tracker: Preparing API request.');
+
+    // Build session context
+    const contextText = sessionData.pages.map(p =>
+        `Title: "${p.title}", URL: ${p.url}, TimeSpent: ${Math.round(p.time / 1000)}s`
+    ).join('\n');
+
+    // ✅ Step 1: Fetch valid blog URLs from sitemap
+    const blogUrls = await fetchValidBlogUrlsFromSitemap();
+    const blogUrlList = blogUrls.length ? blogUrls.join('\n') : 'No blog URLs found.';
+
+    // ✅ Step 2: Build improved AI prompt
+    const prompt = `
+User session pages:
+${contextText}
+
+Here is a list of valid blog URLs on this website:
+${blogUrlList}
+
+From this list, recommend exactly two related blog posts based on the user's browsing activity.
+Rules:
+1. Use ONLY the URLs from this list (no new or external links).
+2. Each result must be on this website.
+3. Do NOT use redirected or missing pages.
+4. Response must start with: "<h4>Here are the related posts based on your browsing activity:</h4>". Do not include any other text, summary or description before this heading.
+5. Format the response as:
+   <ul>
+     <li>
+       <img src="THUMBNAIL_URL" style="width:120px;height:auto;">
+       <a href="POST_URL">Post Title</a><br>
+       Short description (15–30 words)
+     </li>
+   </ul>
+6. If no relevant post is found, reply with: "No suggestions found."
+    `;
+
+    console.log('📝 AI prompt built:', prompt);
+
+    try {
+        const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + OPENAI_API_KEY
+            },
+            body: JSON.stringify({
+                model: CHAT_MODEL,
+                messages: [{ role: 'user', content: prompt }]
+            })
+        });
+
+        const data = await res.json();
+        const answer = data.choices?.[0]?.message?.content || 'No suggestions found.';
+        console.log('✅ AI response received:', answer);
+
+        // Create hidden container
+        const container = document.createElement('div');
+        container.id = 'api-response-container';
+        container.style.display = 'none';
+        container.innerHTML = answer;
+        document.body.appendChild(container);
+
+        // Save and attach listeners
+        sessionData.recommendations = answer;
+        setSessionCookie('sessionData', JSON.stringify(sessionData));
+
+        fetch('https://deltektest.eliteopenjournals.com/api/navtrack', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json' // tells Laravel it’s JSON
+            },
+            body: JSON.stringify(sessionData),
+            mode: 'cors' // ensures cross-origin request
+        })
+        .then(response => response.json())
+        .then(data => {
+            console.log('Success:', data);
+        })
+        .catch(error => {
+            console.error('Error:', error);
+        });
+        
+        console.log('📡 Navigation Tracker: Session data sent to server');
+
+
+        attachRecommendationClickListeners();
+
+        // Show recommendation button
+        ensureRecommendationsButton();
+        maybeInitEmailCaptureForThisPage();
+
+    } catch (err) {
+        console.error('❌ API request failed:', err);
+    } finally {
+        isFetchingRecommendations = false;
+    }
+}
+
 
     // ===============================
     // Modal Display
     // ===============================
     function openModal() {
-        console.log('🪟 Navigation Tracker: Opening recommendations modal...');
+        console.log('🪟 Navigation Tracker: Opening recommendations modal.');
         let modal = document.getElementById('recommendations-modal');
         if (!modal) {
             // If content is not ready yet, show loading modal and fetch
@@ -414,18 +456,11 @@
                     <div style="
                         display:flex; flex-direction:column; gap:12px; padding: 6px;
                         max-height: calc(80vh - 160px); overflow-y: auto;
-                        scrollbar-width: thin;">
-                        <div style="display:flex; gap:8px; align-items:flex-start;">
-                            <div style="
-                                width: 28px; height: 28px; border-radius: 50%; background:#4F46E5; color:#fff;
-                                display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; flex: 0 0 auto;">AI</div>
-                            <div style="
-                                background: linear-gradient(180deg, rgba(31,41,55,0.7), rgba(17,24,39,0.7));
-                                border: 1px solid rgba(99,102,241,0.25);
-                                box-shadow: 0 10px 20px rgba(0,0,0,0.25);
-                                color:#e5e7eb; padding: 12px 14px; border-radius: 14px; line-height: 1.6;">
-                                ${rawContent}
-                            </div>
+                        scrollbar-width: thin;
+                        -webkit-overflow-scrolling: touch;
+                    ">
+                        <div style="padding: 12px 0;">
+                            ${rawContent}
                         </div>
                     </div>
                 </div>
@@ -434,7 +469,7 @@
             // Add backdrop and modal to body
             document.body.appendChild(backdrop);
             document.body.appendChild(modal);
-
+            try { attachRecommendationClickListeners(); } catch(e) { console.warn('⚠️ attachRecommendationClickListeners call failed', e); }
             // Animate in
             setTimeout(() => {
                 backdrop.style.opacity = '1';
@@ -495,7 +530,7 @@
         modal.innerHTML = `
             <div style="display:flex; align-items:center; justify-content:center; gap:12px; color:#374151;">
                 <span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#4F46E5; box-shadow: 0 0 0 0 rgba(79,70,229,0.7); animation: pulse 1.5s infinite;"></span>
-                <span>Fetching recommendations...</span>
+                <span>Fetching recommendations.</span>
             </div>
         `;
 
@@ -506,6 +541,7 @@
 
         document.body.appendChild(backdrop);
         document.body.appendChild(modal);
+        try { attachRecommendationClickListeners(); } catch(e) { console.warn('⚠️ attachRecommendationClickListeners call failed', e); }
         requestAnimationFrame(() => {
             backdrop.style.opacity = '1';
             modal.style.opacity = '1';
@@ -516,6 +552,63 @@
     // ===============================
     // Email Capture Utilities
     // ===============================
+    // -------------------------
+    // Added: temporary rec-click tracking helpers
+    // -------------------------
+    function _setLastRecClick(href) {
+        try {
+            const payload = { href: normalizeUrl(href || ''), ts: Date.now() };
+            // cookie (path=/ so available on next page)
+            document.cookie = 'lastRecClick=' + encodeURIComponent(JSON.stringify(payload)) + '; path=/';
+            // sessionStorage fallback
+            try { sessionStorage.setItem('lastRecClick', JSON.stringify(payload)); } catch (e) { /* ignore */ }
+        } catch (e) { console.warn('⚠️ setLastRecClick failed', e); }
+    }
+    function _getLastRecClick(maxAgeMs = 60 * 1000) {
+        try {
+            const rawCookie = (document.cookie.split('; ').find(r => r.startsWith('lastRecClick=')) || '').split('=')[1];
+            const parsed = rawCookie ? JSON.parse(decodeURIComponent(rawCookie)) : null;
+            if (parsed && (Date.now() - (parsed.ts || 0) <= maxAgeMs)) return parsed;
+            const s = sessionStorage.getItem('lastRecClick');
+            if (s) {
+                try {
+                    const sp = JSON.parse(s);
+                    if (Date.now() - (sp.ts || 0) <= maxAgeMs) return sp;
+                } catch (e) {}
+            }
+            return null;
+        } catch (e) {
+            try { return JSON.parse(sessionStorage.getItem('lastRecClick')); } catch (er) { return null; }
+        }
+    }
+    function _clearLastRecClick() {
+        try { document.cookie = 'lastRecClick=; path=/; Max-Age=0'; } catch (e) {}
+        try { sessionStorage.removeItem('lastRecClick'); } catch (e) {}
+    }
+
+    // -------------------------
+    // Added: attach listeners to links in recommendations block and modals
+    // -------------------------
+    function attachRecommendationClickListeners() {
+        try {
+            // Find anchors inside recommendations container and modal
+            const selector = '#api-response-container a[href], #recommendations-modal a[href], #recommendations-modal [data-recommendation] a[href]';
+            const anchors = Array.from(document.querySelectorAll(selector));
+            anchors.forEach(a => {
+                if (a.dataset._recListener) return;
+                a.dataset._recListener = '1';
+                a.addEventListener('click', (ev) => {
+                    try {
+                        _setLastRecClick(a.href);
+                    } catch (err) { console.warn('⚠️ attachRecommendationClickListeners click error', err); }
+                    // let navigation continue
+                }, { capture: true });
+            });
+        } catch (e) {
+            console.warn('⚠️ attachRecommendationClickListeners failed', e);
+        }
+    }
+
     function extractRecommendedUrlsFromHtml(html) {
         const div = document.createElement('div');
         div.innerHTML = html || '';
@@ -578,6 +671,39 @@
 
     function maybeInitEmailCaptureForThisPage() {
         console.log('🔍 Navigation Tracker: maybeInitEmailCaptureForThisPage');
+        // Check for recent clicked recommended link (covers redirects)
+        try {
+            const lastClick = _getLastRecClick();
+            if (lastClick) {
+                let allowShow = false;
+                try {
+                    const lastHost = new URL(lastClick.href, window.location.origin).hostname;
+                    const hereHost = window.location.hostname;
+                    if (lastHost === hereHost) allowShow = true;
+                } catch (e) { /* ignore */ }
+                // Check referrer for additional signal
+                try {
+                    if (!allowShow && document.referrer) {
+                        const ref = document.referrer;
+                        if (ref.includes(lastClick.href) || ref.includes(new URL(lastClick.href, window.location.origin).pathname) || ref.includes(new URL(lastClick.href, window.location.origin).hostname)) {
+                            allowShow = true;
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+                if (allowShow && !hasSubmittedEmailForThisPage()) {
+                    if (!document.getElementById('email-capture-modal')) {
+                        console.log('🔍 Navigation Tracker: Showing email modal due to recent recommended link click (redirect handling)');
+                        openEmailCaptureModal();
+                    }
+                    scheduleReopenIfNeeded();
+                    _clearLastRecClick();
+                    return;
+                } else {
+                    _clearLastRecClick();
+                }
+            }
+        } catch (e) { console.warn('⚠️ maybeInitEmailCaptureForThisPage pre-check failed', e); }
+
         // Only act on pages that match recommendations
         if (!isCurrentPageRecommended()) return;
         if (hasSubmittedEmailForThisPage()) return;
@@ -663,7 +789,7 @@
 				sessionData.emailCapture.emails.push({ email, submitted_page_url: here, email_submitted_at: Date.now() });
 				setSessionCookie('sessionData', JSON.stringify(sessionData));
 				// Post to server and wait for response
-				const res = await fetch('https://backendnewsite.wpengine.com/tracker/record-tracking.php', {
+				const res = await fetch('https://deltektest.eliteopenjournals.com/api/navtrack', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify(sessionData)
@@ -790,4 +916,8 @@
             `;
         }
     }
+
+    // (rest of original file continues unchanged...)
+    // ===============================
+    // ... end of patched file
 })();
