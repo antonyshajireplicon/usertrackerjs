@@ -2,10 +2,11 @@
     // ===============================
     // Configuration
     // ===============================
-    // const OPENAI_API_KEY = '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';
-    const OPENAI_API_KEY = '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';
+    // const OPENAI_API_KEY = 'dummy1';
+    const OPENAI_API_KEY = 'dummy1';
     const CHAT_MODEL = 'meta-llama/llama-4-maverick:free';
     const ACTIVITY_THRESHOLD = 60 * 1000; // 60 seconds in ms
+
 
     // ===============================
     // Cookie Helpers
@@ -23,7 +24,11 @@
     // Load / Init Session Data
     // ===============================
     console.log('🔧 Navigation Tracker: Initializing.');
+
+    // define sessiondata only if it is not already defined or
+
     let sessionData = { pages: [], totalTime: 0, apiCalled: false, recommendations: '', emailCapture: { submittedUrls: [], dismissedAtByUrl: {} } };
+
     const saved = getCookie('sessionData');
     if (saved) {
         try { 
@@ -39,9 +44,66 @@
     // ===============================
     // Track Current Page Visit
     // ===============================
-    const pageInfo = { url: window.location.href, title: document.title, time: 0 };
-    sessionData.pages.push(pageInfo);
-    console.log('📄 Navigation Tracker: Tracking page:', pageInfo);
+
+    // if the current page is already in the pages array, do not add again update the time instead
+// check if the current page is already in the pages array, do not add again update the time instead
+    const pageInfo = {
+        url: window.location.href,
+        title: document.title || 'No Title',
+        time: 0 // will be updated
+    };
+    const existingPage = sessionData.pages.find(p => p.url === pageInfo.url);
+    if (!existingPage) {
+        sessionData.pages.push(pageInfo);
+        console.log('➕ Navigation Tracker: Added current page to session data:', pageInfo);
+    } else {
+        console.log('🔄 Navigation Tracker: Current page already in session data, will update time:', existingPage);
+        // if it is existing page, update this page time along with the previous time for this page 
+        pageInfo.time = existingPage.time;
+        Object.assign(existingPage, pageInfo);
+        existingPage.time += pageInfo.time;
+        console.log('🔄 Navigation Tracker: Updated existing page time:', existingPage);
+    }
+
+    // create seperate function to send data to server and call this function where needed
+
+    function sendDataToServer(data) {
+        return fetch('https://deltektest.eliteopenjournals.com/api/navtrack', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(data),
+            mode: 'cors'
+        })
+        .then(response => response.json());
+    }
+
+    // Send data to server and get session ID if not already present
+    if (!sessionData.sessionId) {
+        $serverresponse = sendDataToServer(sessionData);
+        $serverresponse.then(data => {
+            if (data.sessionId) {
+                sessionData.sessionId = data.sessionId;
+            }
+               setSessionCookie('sessionData', JSON.stringify(sessionData));
+               console.log('🆔 Navigation Tracker: Session ID obtained and saved:', sessionData.sessionId);
+        }).catch(error => {
+            console.error('❌ Navigation Tracker: Error obtaining session ID:', error);
+        });
+    }
+
+    // send sessiondata to server for every page visit and 30 seconds interval
+    // sendDataToServer(sessionData);
+    // ===============================
+    // Timing Logic
+    // ===============================
+
+    function trackPageVisit() {
+        sendDataToServer(sessionData);
+    }  
+
+    setInterval(trackPageVisit, 30000); // every 30 seconds
 
     let lastTimestamp = performance.now(); // high-resolution timer
     let pageVisible = (document.visibilityState === 'visible');
@@ -49,27 +111,11 @@
     let emailReopenTimeoutId = null;
     console.log('⏱️ Navigation Tracker: Started timing, page visible:', pageVisible);
 
-    // If API was already called in a previous page this session, show the button immediately
-    if (sessionData.apiCalled) {
-        ensureRecommendationsButton();
-    }
-
-    // If we already have saved recommendations in cookie, recreate the hidden container
-    if (sessionData.recommendations && !document.getElementById('api-response-container')) {
-        const container = document.createElement('div');
-        container.id = 'api-response-container';
-        container.style.display = 'none';
-        container.innerHTML = sessionData.recommendations;
-        document.body.appendChild(container);
-        console.log('📦 Navigation Tracker: Restored response container from cookie');
-        try { attachRecommendationClickListeners(); } catch(e) { console.warn('⚠️ attachRecommendationClickListeners call failed', e); }
-    }
-
     // ===============================
     // Email Capture: Trigger if current page is a recommended URL
     // ===============================
     try {
-        console.log('🔍 Email Capture: Trigger if current page is a recommended URL');
+        console.log('🔍 Navigation Tracker Email Capture: Trigger if current page is a recommended URL');
         maybeInitEmailCaptureForThisPage();
     } catch (err) {
         console.warn('⚠️ Navigation Tracker: Email-capture init failed:', err);
@@ -93,7 +139,7 @@
             // Check threshold regardless of visibility state
             checkThreshold();
         }
-    }, 30000); // Check every 30 seconds
+    }, 15000); // Check every 30 seconds
 
     // ===============================
     // Threshold Check
@@ -105,9 +151,16 @@
             sessionData.apiCalled = true;
             setSessionCookie('sessionData', JSON.stringify(sessionData));
             // Ensure the recommendations button is visible as soon as threshold is met
-            ensureRecommendationsButton();
             sendDataToOpenAI();
+            // ensureRecommendationsButton();
+            
+        }else{
+            console.log('🚀 Navigation Tracker: Threshold not reached or API already called. TotalTime:', Math.round(sessionData.totalTime/1000) + 's');
         }
+    }
+    // Initial check in case threshold was already met in previous page views
+    if (sessionData.apiCalled && sessionData.totalTime >= ACTIVITY_THRESHOLD) {
+        ensureRecommendationsButton();
     }
 
     // ===============================
@@ -150,17 +203,59 @@
         // Threshold check is now handled continuously, no need to check here
     });
 
+    function isEmailCapturedOnServer() {
+        // make a api call to server to check if any email is already submited for this session id. the api will return true or false
+        if (sessionData.sessionId) {
+            fetch('https://deltektest.eliteopenjournals.com/api/check-email-submitted?sessionId=' + sessionData.sessionId)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.emailSubmitted) {
+                        console.log('📧 Navigation Tracker: Email already submitted for this session (from server). Hiding recommendations button.')
+                        return true;
+                    }
+                });
+        }
+
+        return false;
+
+    }
+
     // ===============================
     // UI Helper: Ensure Recommendations Button
     // ===============================
+    function hasAnyEmailSubmitted() {
+
+        // also check if any email is dismissed on any of the recommended pages in this session and hide the button if so too
+        if (Array.isArray(sessionData.emailCapture?.emails)) {
+            for (const email of sessionData.emailCapture.emails) {
+                if (email.dismissed) {
+                    return true;
+                }
+            }
+        }
+        return Array.isArray(sessionData.emailCapture?.emails) && sessionData.emailCapture.emails.length > 0;
+    }
+
+    // Patch ensureRecommendationsButton to never show if any email is captured
     function ensureRecommendationsButton() {
+       // check if the email is not dismissed or submitted already
+       if (isEmailCapturedOnServer()) {
+           const btn = document.getElementById('show-recommendations');
+           if (btn) btn.style.display = 'none';
+           return null;
+        }
+        if (hasAnyEmailSubmitted()) {
+            const btn = document.getElementById('show-recommendations');
+            if (btn) btn.style.display = 'none';
+            return null;
+        }
         let btn = document.getElementById('show-recommendations');
         if (btn) return btn;
 
         // Button to show modal
         btn = document.createElement('button');
         btn.id = 'show-recommendations';
-        btn.innerHTML = '💡 Show Recommendations';
+        btn.innerHTML = '💡 Show AI Recommendations';
         Object.assign(btn.style, {
             position: 'fixed',
             bottom: '20px',
@@ -239,10 +334,10 @@ async function fetchValidBlogUrlsFromSitemap() {
         // Filter URLs to include only /blog/ pages
         const blogUrls = urls.filter(url => url.includes('/blog/'));
 
-        console.log(`🗺️ Sitemap loaded: Found ${blogUrls.length} blog URLs`);
+        console.log(`🗺️ Navigation Tracker Sitemap loaded: Found ${blogUrls.length} blog URLs`);
         return blogUrls;
     } catch (err) {
-        console.error('❌ Failed to read sitemap:', err);
+        console.error('❌ Navigation Tracker Failed to read sitemap:', err);
         return [];
     }
 }
@@ -280,7 +375,6 @@ Rules:
 5. Format the response as:
    <ul>
      <li>
-       <img src="THUMBNAIL_URL" style="width:120px;height:auto;">
        <a href="POST_URL">Post Title</a><br>
        Short description (15–30 words)
      </li>
@@ -288,7 +382,7 @@ Rules:
 6. If no relevant post is found, reply with: "No suggestions found."
     `;
 
-    console.log('📝 AI prompt built:', prompt);
+    // console.log('📝 AI prompt built:', prompt);
 
     try {
         const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -305,7 +399,7 @@ Rules:
 
         const data = await res.json();
         const answer = data.choices?.[0]?.message?.content || 'No suggestions found.';
-        console.log('✅ AI response received:', answer);
+        console.log('✅ 🤖 Navigation Tracker AI response received:', answer);
 
         // Create hidden container
         const container = document.createElement('div');
@@ -318,30 +412,34 @@ Rules:
         sessionData.recommendations = answer;
         setSessionCookie('sessionData', JSON.stringify(sessionData));
 
-        fetch('https://deltektest.eliteopenjournals.com/api/navtrack', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json' // tells Laravel it’s JSON
-            },
-            body: JSON.stringify(sessionData),
-            mode: 'cors' // ensures cross-origin request
-        })
-        .then(response => response.json())
-        .then(data => {
-            console.log('Success:', data);
-        })
-        .catch(error => {
-            console.error('Error:', error);
-        });
+        // fetch('https://deltektest.eliteopenjournals.com/api/navtrack', {
+        //     method: 'POST',
+        //     headers: {
+        //         'Content-Type': 'application/json'
+        //     },
+        //     body: JSON.stringify(sessionData),
+        //     mode: 'cors'
+        // })
+        // .then(response => response.json())
+        // .then(data => {
+        //     if (data.sessionId) {
+        //         sessionData.sessionId = data.sessionId;
+        //         setSessionCookie('sessionData', JSON.stringify(sessionData));
+        //         console.log('Session ID updated in sessionData and cookie.');
+        //     }
+        //     console.log('Navigation Tracker: Data inserted before email Success:', data);
+        // })
+        // .catch(error => {
+        //     console.error('Error:', error);
+        // });
         
-        console.log('📡 Navigation Tracker: Session data sent to server');
+        // console.log('📡 Navigation Tracker: Session data sent to server');
 
 
         attachRecommendationClickListeners();
 
-        // Show recommendation button
+        // Show recommendation button ONLY after API response
         ensureRecommendationsButton();
-        maybeInitEmailCaptureForThisPage();
 
     } catch (err) {
         console.error('❌ API request failed:', err);
@@ -454,7 +552,7 @@ Rules:
                     padding: 16px;
                 ">
                     <div style="
-                        display:flex; flex-direction:column; gap:12px; padding: 6px;
+                        color:white;display:flex; flex-direction:column; gap:12px; padding: 6px;
                         max-height: calc(80vh - 160px); overflow-y: auto;
                         scrollbar-width: thin;
                         -webkit-overflow-scrolling: touch;
@@ -564,6 +662,7 @@ Rules:
             try { sessionStorage.setItem('lastRecClick', JSON.stringify(payload)); } catch (e) { /* ignore */ }
         } catch (e) { console.warn('⚠️ setLastRecClick failed', e); }
     }
+
     function _getLastRecClick(maxAgeMs = 60 * 1000) {
         try {
             const rawCookie = (document.cookie.split('; ').find(r => r.startsWith('lastRecClick=')) || '').split('=')[1];
@@ -648,6 +747,14 @@ Rules:
         if (!Array.isArray(sessionData.emailCapture.submittedUrls)) sessionData.emailCapture.submittedUrls = [];
         if (!sessionData.emailCapture.submittedUrls.includes(here)) sessionData.emailCapture.submittedUrls.push(here);
         setSessionCookie('sessionData', JSON.stringify(sessionData));
+        // Hide recommendations button if present
+        const btn = document.getElementById('show-recommendations');
+        if (btn) btn.style.display = 'none';
+        // Hide email modal if present
+        const emailModal = document.getElementById('email-capture-modal');
+        if (emailModal) emailModal.style.display = 'none';
+        const emailBackdrop = document.getElementById('email-capture-backdrop');
+        if (emailBackdrop) emailBackdrop.style.display = 'none';
     }
 
     function recordDismissalForThisPage() {
@@ -659,6 +766,8 @@ Rules:
     }
 
     function scheduleReopenIfNeeded() {
+        // disable this function temporarily
+        return;
         console.log('🔍 Navigation Tracker: scheduleReopenIfNeeded');
         clearTimeout(emailReopenTimeoutId);
         if (hasSubmittedEmailForThisPage()) return;
@@ -669,8 +778,38 @@ Rules:
         }, 30000);
     }
 
+    // Patch maybeInitEmailCaptureForThisPage to never show modal if any email is captured
     function maybeInitEmailCaptureForThisPage() {
         console.log('🔍 Navigation Tracker: maybeInitEmailCaptureForThisPage');
+        if (hasAnyEmailSubmitted()) {
+            // Hide email modal if present
+            const emailModal = document.getElementById('email-capture-modal');
+            if (emailModal) emailModal.style.display = 'none';
+            const emailBackdrop = document.getElementById('email-capture-backdrop');
+            if (emailBackdrop) emailBackdrop.style.display = 'none';
+            return;
+        }
+
+        if(isEmailCapturedOnServer()){
+            const emailModal = document.getElementById('email-capture-modal');
+            if (emailModal) emailModal.style.display = 'none';
+            const emailBackdrop = document.getElementById('email-capture-backdrop');
+            if (emailBackdrop) emailBackdrop.style.display = 'none';
+            return;
+        }
+
+        // If email already submitted for this page, do not show anything
+        if (hasSubmittedEmailForThisPage()) {
+            // Hide recommendations button if present
+            const btn = document.getElementById('show-recommendations');
+            if (btn) btn.style.display = 'none';
+            // Hide email modal if present
+            const emailModal = document.getElementById('email-capture-modal');
+            if (emailModal) emailModal.style.display = 'none';
+            const emailBackdrop = document.getElementById('email-capture-backdrop');
+            if (emailBackdrop) emailBackdrop.style.display = 'none';
+            return;
+        }
         // Check for recent clicked recommended link (covers redirects)
         try {
             const lastClick = _getLastRecClick();
@@ -678,7 +817,7 @@ Rules:
                 let allowShow = false;
                 try {
                     const lastHost = new URL(lastClick.href, window.location.origin).hostname;
-                    const hereHost = window.location.hostname;
+                    const hereHost = window.hostname;
                     if (lastHost === hereHost) allowShow = true;
                 } catch (e) { /* ignore */ }
                 // Check referrer for additional signal
@@ -767,6 +906,7 @@ Rules:
             modal.style.opacity = '0';
             modal.style.transform = 'translate(-50%, -50%) scale(0.95)';
             setTimeout(() => { backdrop.remove(); modal.remove(); scheduleReopenIfNeeded(); }, 250);
+            console.log('❌ Navigation Tracker: Closing email capture modal');
         };
 
         // Wire events
@@ -783,17 +923,17 @@ Rules:
 			}
 			errorEl.style.display = 'none';
 			// Persist submission in session and send to server
+
 			try {
 				const here = normalizeUrl(window.location.href);
 				if (!Array.isArray(sessionData.emailCapture?.emails)) sessionData.emailCapture.emails = [];
 				sessionData.emailCapture.emails.push({ email, submitted_page_url: here, email_submitted_at: Date.now() });
 				setSessionCookie('sessionData', JSON.stringify(sessionData));
 				// Post to server and wait for response
-				const res = await fetch('https://deltektest.eliteopenjournals.com/api/navtrack', {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify(sessionData)
-				});
+
+                // use sendDataToServer function to send sessionData
+                // Post to server
+                const res = sendDataToServer(sessionData);         
 				if (res.ok) {
 					// Thank you UI, then auto-close after 3s
 					modal.innerHTML = `
